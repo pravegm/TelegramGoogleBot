@@ -749,12 +749,14 @@ bot.on("callback_query:data", async (ctx) => {
 
 // ==================== Scheduled Updates ====================
 
-async function sendScheduledUpdate(prompt, label, useLite = false) {
-  console.log(`Sending ${label}...`);
+async function sendScheduledUpdate(prompt, label) {
+  console.log(`[${new Date().toISOString()}] Sending ${label}...`);
   try {
-    const reply = useLite
-      ? await chatLite(prompt)
-      : await chat(ALLOWED_USER_ID, prompt);
+    const reply = await chatLite(prompt);
+    if (!reply || reply.length === 0) {
+      console.error(`${label}: empty response from chatLite`);
+      return;
+    }
     const chunks = [];
     if (reply.length > 4000) { for (let i = 0; i < reply.length; i += 4000) chunks.push(reply.slice(i, i + 4000)); }
     else chunks.push(reply);
@@ -762,29 +764,47 @@ async function sendScheduledUpdate(prompt, label, useLite = false) {
       try { await bot.api.sendMessage(ALLOWED_USER_ID, chunk, { parse_mode: "HTML" }); }
       catch { await bot.api.sendMessage(ALLOWED_USER_ID, chunk.replace(/<[^>]*>/g, "")); }
     }
-  } catch (err) { console.error(`${label} failed:`, err); }
+    console.log(`[${new Date().toISOString()}] ${label} sent successfully`);
+  } catch (err) {
+    console.error(`${label} failed:`, err.message);
+    try { await bot.api.sendMessage(ALLOWED_USER_ID, `Scheduled update "${label}" failed: ${err.message}`); } catch {}
+  }
 }
 
-cron.schedule("0 8 * * *", () => {
-  sendScheduledUpdate(
-    `Morning delivery update. Check BOTH Google accounts for any delivery or parcel emails from the last few days. Use get_delivery_status to get live tracking info. Tell Praveg what's arriving today, what's in transit, and what's been delivered recently. Keep it short and clear. Use HTML formatting.`,
-    "Morning delivery update"
-  );
-}, { timezone: "Europe/London" });
+async function sendDeliveryUpdate() {
+  console.log(`[${new Date().toISOString()}] Sending morning delivery update...`);
+  try {
+    const deliveryData = await getDeliveryStatus();
+    const prompt = `Here is raw delivery email data from Praveg's Google accounts:\n\n${JSON.stringify(deliveryData).slice(0, 8000)}\n\nSummarise what's arriving today, what's in transit, and what was delivered recently. Be concise. Use Telegram HTML formatting.`;
+    const reply = await chatLite(prompt);
+    if (!reply) return;
+    const chunks = [];
+    if (reply.length > 4000) { for (let i = 0; i < reply.length; i += 4000) chunks.push(reply.slice(i, i + 4000)); }
+    else chunks.push(reply);
+    for (const chunk of chunks) {
+      try { await bot.api.sendMessage(ALLOWED_USER_ID, chunk, { parse_mode: "HTML" }); }
+      catch { await bot.api.sendMessage(ALLOWED_USER_ID, chunk.replace(/<[^>]*>/g, "")); }
+    }
+    console.log(`[${new Date().toISOString()}] Morning delivery update sent`);
+  } catch (err) {
+    console.error("Delivery update failed:", err.message);
+    try { await bot.api.sendMessage(ALLOWED_USER_ID, `Delivery update failed: ${err.message}`); } catch {}
+  }
+}
+
+cron.schedule("0 8 * * *", () => { sendDeliveryUpdate(); }, { timezone: "Europe/London" });
 
 cron.schedule("0 13 * * *", () => {
   sendScheduledUpdate(
-    `Afternoon news briefing. Search the web for today's top world news headlines. Give Praveg a quick summary of the 5-6 most important things happening in the world right now. Cover a mix: politics, economy, tech, anything major. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
-    "Afternoon world news",
-    true
+    `Search the web for today's top world news headlines. Give a quick summary of the 5-6 most important things happening in the world right now. Cover a mix: politics, economy, tech, anything major. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
+    "Afternoon world news"
   );
 }, { timezone: "Europe/London" });
 
 cron.schedule("0 19 * * *", () => {
   sendScheduledUpdate(
-    `Evening AI news roundup. Search the web for today's latest AI and tech news. Give Praveg a summary of the 5-6 most interesting AI developments, product launches, research breakthroughs, or industry moves from today. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
-    "Evening AI news",
-    true
+    `Search the web for today's latest AI and tech news. Give a summary of the 5-6 most interesting AI developments, product launches, research breakthroughs, or industry moves from today. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
+    "Evening AI news"
   );
 }, { timezone: "Europe/London" });
 
