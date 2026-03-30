@@ -1,0 +1,18 @@
+{
+  "name": "telegram-google-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets)",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.47.0",
+    "dotenv": "^17.3.1",
+    "googleapis": "^171.4.0",
+    "grammy": "^1.41.1",
+    "node-cron": "^4.2.1",
+    "node-windows": "^1.0.0-beta.8"
+  }
+}
