@@ -213,13 +213,89 @@ export async function listFiles(account, maxResults = 15) {
 
 export async function searchFiles(account, query, maxResults = 15) {
   const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const escaped = query.replace(/'/g, "\\'");
   const res = await drive.files.list({
-    q: `fullText contains '${query.replace(/'/g, "\\'")}'`,
+    q: `(name contains '${escaped}' or fullText contains '${escaped}') and trashed = false`,
     pageSize: maxResults,
     orderBy: "modifiedTime desc",
-    fields: "files(id,name,mimeType,modifiedTime,webViewLink)",
+    fields: "files(id,name,mimeType,modifiedTime,webViewLink,parents)",
   });
   return res.data.files || [];
+}
+
+export async function listFolderTree(account, folderId = "root", depth = 0, maxDepth = 3) {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and trashed = false`,
+    pageSize: 50,
+    fields: "files(id,name,mimeType)",
+    orderBy: "name",
+  });
+
+  const items = [];
+  for (const f of res.data.files || []) {
+    const isFolder = f.mimeType === "application/vnd.google-apps.folder";
+    const entry = { name: f.name, id: f.id, type: isFolder ? "folder" : "file" };
+    if (isFolder && depth < maxDepth) {
+      entry.children = await listFolderTree(account, f.id, depth + 1, maxDepth);
+    }
+    items.push(entry);
+  }
+  return items;
+}
+
+export async function moveFile(account, fileId, newParentId) {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const file = await drive.files.get({ fileId, fields: "parents" });
+  const previousParents = (file.data.parents || []).join(",");
+  const res = await drive.files.update({
+    fileId,
+    addParents: newParentId,
+    removeParents: previousParents,
+    fields: "id,name,parents",
+  });
+  return res.data;
+}
+
+export async function renameFile(account, fileId, newName) {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const res = await drive.files.update({
+    fileId,
+    requestBody: { name: newName },
+    fields: "id,name",
+  });
+  return res.data;
+}
+
+export async function createFolder(account, name, parentId = "root") {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const res = await drive.files.create({
+    requestBody: {
+      name,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentId],
+    },
+    fields: "id,name,webViewLink",
+  });
+  return res.data;
+}
+
+export async function deleteFile(account, fileId) {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  await drive.files.delete({ fileId });
+  return { deleted: true };
+}
+
+export async function copyFile(account, fileId, newName) {
+  const drive = google.drive({ version: "v3", auth: getAuth(account) });
+  const body = {};
+  if (newName) body.name = newName;
+  const res = await drive.files.copy({
+    fileId,
+    requestBody: body,
+    fields: "id,name,webViewLink",
+  });
+  return res.data;
 }
 
 // --------------- Docs ---------------
@@ -236,6 +312,32 @@ export async function readDoc(account, docId) {
     }
   }
   return { title: res.data.title, body: text.slice(0, 3000) };
+}
+
+export async function createDocument(account, title, body = "") {
+  const docs = google.docs({ version: "v1", auth: getAuth(account) });
+  const res = await docs.documents.create({ requestBody: { title } });
+  const docId = res.data.documentId;
+  if (body) {
+    await docs.documents.batchUpdate({
+      documentId: docId,
+      requestBody: {
+        requests: [{ insertText: { location: { index: 1 }, text: body } }],
+      },
+    });
+  }
+  return { id: docId, title, url: `https://docs.google.com/document/d/${docId}/edit` };
+}
+
+export async function appendToDocument(account, docId, text) {
+  const docs = google.docs({ version: "v1", auth: getAuth(account) });
+  await docs.documents.batchUpdate({
+    documentId: docId,
+    requestBody: {
+      requests: [{ insertText: { endOfSegmentLocation: {}, text: "\n" + text } }],
+    },
+  });
+  return { appended: true, docId };
 }
 
 // --------------- Gmail Actions ---------------
@@ -379,4 +481,34 @@ export async function readSheet(account, spreadsheetId, range = "Sheet1") {
     range,
   });
   return res.data.values || [];
+}
+
+export async function appendToSheet(account, spreadsheetId, range = "Sheet1", rows) {
+  const sheets = google.sheets({ version: "v4", auth: getAuth(account) });
+  const res = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: rows },
+  });
+  return { updatedRows: res.data.updates?.updatedRows || 0, updatedRange: res.data.updates?.updatedRange || "" };
+}
+
+export async function updateSheetCells(account, spreadsheetId, range, values) {
+  const sheets = google.sheets({ version: "v4", auth: getAuth(account) });
+  const res = await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values },
+  });
+  return { updatedCells: res.data.updatedCells || 0, updatedRange: res.data.updatedRange || "" };
+}
+
+export async function createSpreadsheet(account, title) {
+  const sheets = google.sheets({ version: "v4", auth: getAuth(account) });
+  const res = await sheets.spreadsheets.create({
+    requestBody: { properties: { title } },
+  });
+  return { id: res.data.spreadsheetId, title, url: res.data.spreadsheetUrl };
 }

@@ -6,7 +6,9 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 
 - **Gmail** -- list, read, search, send, reply, archive, and trash emails
 - **Google Calendar** -- list, create, update, and delete events
-- **Google Drive** -- list and search files, read Docs and Sheets
+- **Google Drive** -- list, search, move, rename, copy, and delete files; create folders; browse folder tree
+- **Google Docs** -- read, create, and append to documents
+- **Google Sheets** -- read, create, append rows, and update cells
 - **Google Tasks** -- list, create, complete, update, and delete tasks
 - **Delivery Tracking** -- scans emails for delivery/parcel updates across multiple accounts
 - **Voice Notes** -- transcribes voice messages and responds
@@ -54,7 +56,7 @@ Place your Google OAuth credentials at `~/.google-mcp/credentials.json` and acco
 node bot.js
 ```
 
-For background execution on Windows, use the included `start-bot.vbs` (place in Startup folder for auto-launch).
+For background execution on Windows, use the included `start-bot.vbs` (place in Startup folder for auto-launch). Output is logged to `bot.log`.
 
 ## Bot Commands
 

@@ -5,7 +5,9 @@ import cron from "node-cron";
 import {
   listEmails, readEmail, sendEmail, searchEmails,
   listEvents, createEvent, deleteEvent, updateEvent,
-  listFiles, searchFiles, readDoc, readSheet,
+  listFiles, searchFiles, listFolderTree, moveFile, renameFile, createFolder, deleteFile, copyFile,
+  readDoc, createDocument, appendToDocument,
+  readSheet, appendToSheet, updateSheetCells, createSpreadsheet,
   replyToEmail, archiveEmail, trashEmail,
   listTaskLists, listTasks, createTask, completeTask, updateTask, deleteTask,
 } from "./google_client.js";
@@ -20,7 +22,7 @@ const bot = new Bot(BOT_TOKEN);
 const MODEL_HEAVY = "gemini-3-flash-preview";
 const MODEL_LITE = "gemini-2.5-flash-lite";
 
-function truncateResult(obj, maxLen = 14000) {
+function truncateResult(obj, maxLen = 30000) {
   let json = JSON.stringify(obj);
   if (json.length <= maxLen) return obj;
 
@@ -319,6 +321,83 @@ const functionDeclarations = [
     },
   },
   {
+    name: "list_folder_tree",
+    description: "Get the folder structure of Google Drive as a tree. Use this when the user asks about their Drive layout, folder hierarchy, or file organisation.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        folderId: { type: Type.STRING, description: "Folder ID to start from (default: 'root' for top-level)" },
+        maxDepth: { type: Type.NUMBER, description: "How many levels deep to recurse (default: 3, max: 4)" },
+      },
+      required: ["account"],
+    },
+  },
+  {
+    name: "move_file",
+    description: "Move a file or folder to a different folder in Google Drive",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        fileId: { type: Type.STRING, description: "ID of the file/folder to move" },
+        newParentId: { type: Type.STRING, description: "ID of the destination folder" },
+      },
+      required: ["account", "fileId", "newParentId"],
+    },
+  },
+  {
+    name: "rename_file",
+    description: "Rename a file or folder in Google Drive",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        fileId: { type: Type.STRING, description: "ID of the file/folder to rename" },
+        newName: { type: Type.STRING, description: "New name for the file/folder" },
+      },
+      required: ["account", "fileId", "newName"],
+    },
+  },
+  {
+    name: "create_folder",
+    description: "Create a new folder in Google Drive",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        name: { type: Type.STRING, description: "Folder name" },
+        parentId: { type: Type.STRING, description: "Parent folder ID (default: root)" },
+      },
+      required: ["account", "name"],
+    },
+  },
+  {
+    name: "delete_file",
+    description: "Permanently delete a file or folder from Google Drive",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        fileId: { type: Type.STRING, description: "ID of the file/folder to delete" },
+      },
+      required: ["account", "fileId"],
+    },
+  },
+  {
+    name: "copy_file",
+    description: "Copy a file in Google Drive, optionally with a new name",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        fileId: { type: Type.STRING, description: "ID of the file to copy" },
+        newName: { type: Type.STRING, description: "Name for the copy (optional)" },
+      },
+      required: ["account", "fileId"],
+    },
+  },
+  {
     name: "read_document",
     description: "Read a Google Doc's content",
     parameters: {
@@ -328,6 +407,32 @@ const functionDeclarations = [
         docId: { type: Type.STRING, description: "Google Doc ID" },
       },
       required: ["account", "docId"],
+    },
+  },
+  {
+    name: "create_document",
+    description: "Create a new Google Doc with optional initial content",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        title: { type: Type.STRING, description: "Document title" },
+        body: { type: Type.STRING, description: "Initial text content (optional)" },
+      },
+      required: ["account", "title"],
+    },
+  },
+  {
+    name: "append_to_document",
+    description: "Append text to the end of an existing Google Doc",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        docId: { type: Type.STRING, description: "Google Doc ID" },
+        text: { type: Type.STRING, description: "Text to append" },
+      },
+      required: ["account", "docId", "text"],
     },
   },
   {
@@ -341,6 +446,46 @@ const functionDeclarations = [
         range: { type: Type.STRING, description: "Cell range (default: 'Sheet1')" },
       },
       required: ["account", "spreadsheetId"],
+    },
+  },
+  {
+    name: "append_to_sheet",
+    description: "Append rows to a Google Sheet. Each row is an array of values.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID" },
+        range: { type: Type.STRING, description: "Sheet range in A1 notation (default: 'Sheet1')" },
+        rows: { type: Type.ARRAY, description: "Array of rows to append, e.g. [['Name','Age'],['Praveg','25']]", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
+      },
+      required: ["account", "spreadsheetId", "rows"],
+    },
+  },
+  {
+    name: "update_sheet_cells",
+    description: "Update specific cells in a Google Sheet",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID" },
+        range: { type: Type.STRING, description: "Cell range in A1 notation, e.g. 'Sheet1!A1:B2'" },
+        values: { type: Type.ARRAY, description: "2D array of values to write", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
+      },
+      required: ["account", "spreadsheetId", "range", "values"],
+    },
+  },
+  {
+    name: "create_spreadsheet",
+    description: "Create a new Google Spreadsheet",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        account: { type: Type.STRING, description: "Google account name" },
+        title: { type: Type.STRING, description: "Spreadsheet title" },
+      },
+      required: ["account", "title"],
     },
   },
   {
@@ -463,11 +608,22 @@ async function executeTool(name, args, convo) {
     case "delete_calendar_event": return await deleteEvent(args.account, args.eventId);
     case "list_drive_files": return await listFiles(args.account, args.maxResults || 15);
     case "search_drive_files": return await searchFiles(args.account, args.query, args.maxResults || 15);
+    case "move_file": return await moveFile(args.account, args.fileId, args.newParentId);
+    case "rename_file": return await renameFile(args.account, args.fileId, args.newName);
+    case "create_folder": return await createFolder(args.account, args.name, args.parentId || "root");
+    case "delete_file": return await deleteFile(args.account, args.fileId);
+    case "copy_file": return await copyFile(args.account, args.fileId, args.newName || "");
     case "read_document": return await readDoc(args.account, args.docId);
+    case "create_document": return await createDocument(args.account, args.title, args.body || "");
+    case "append_to_document": return await appendToDocument(args.account, args.docId, args.text);
     case "read_spreadsheet": return await readSheet(args.account, args.spreadsheetId, args.range || "Sheet1");
+    case "append_to_sheet": return await appendToSheet(args.account, args.spreadsheetId, args.range || "Sheet1", args.rows);
+    case "update_sheet_cells": return await updateSheetCells(args.account, args.spreadsheetId, args.range, args.values);
+    case "create_spreadsheet": return await createSpreadsheet(args.account, args.title);
     case "switch_account":
       if (convo) convo.account = args.account;
       return { switched: true, account: args.account };
+    case "list_folder_tree": return await listFolderTree(args.account, args.folderId || "root", 0, Math.min(args.maxDepth || 3, 4));
     case "get_delivery_status": return await getDeliveryStatus();
     case "list_task_lists": return await listTaskLists(args.account);
     case "list_tasks": return await listTasks(args.account, args.taskListId || "@default", args.showCompleted || false);
@@ -514,19 +670,29 @@ async function chat(userId, userMessage) {
 
   let rounds = 10;
   while (rounds-- > 0) {
-    const response = await genai.models.generateContent({
-      model: MODEL_HEAVY,
-      contents,
-      config: {
-        systemInstruction: systemPrompt,
-        tools: toolsConfig,
-        toolConfig: { includeServerSideToolInvocations: true },
-        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
-      },
-    });
+    let response;
+    try {
+      response = await genai.models.generateContent({
+        model: MODEL_HEAVY,
+        contents,
+        config: {
+          systemInstruction: systemPrompt,
+          tools: toolsConfig,
+          toolConfig: { includeServerSideToolInvocations: true },
+          thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+        },
+      });
+    } catch (apiErr) {
+      console.error(`[${new Date().toISOString()}] Gemini API error (round ${10 - rounds}):`, apiErr.message);
+      convo.history.push({ role: "model", parts: [{ text: `API error: ${apiErr.message}` }] });
+      return `Something broke on the AI side: ${apiErr.message}`;
+    }
 
     const candidate = response.candidates?.[0];
-    if (!candidate?.content?.parts) break;
+    if (!candidate?.content?.parts) {
+      console.error(`[${new Date().toISOString()}] Empty candidate (round ${10 - rounds}), finishReason: ${candidate?.finishReason || "unknown"}`);
+      break;
+    }
 
     const parts = candidate.content.parts;
     contents.push(candidate.content);
@@ -539,14 +705,15 @@ async function chat(userId, userMessage) {
       return text;
     }
 
+    console.log(`[${new Date().toISOString()}] Round ${10 - rounds}: ${functionCalls.map(fc => fc.name).join(", ")}`);
     const functionResponseParts = [];
     for (const fc of functionCalls) {
-      console.log(`Tool: ${fc.name}(${JSON.stringify(fc.args).slice(0, 200)})`);
+      console.log(`  Tool: ${fc.name}(${JSON.stringify(fc.args).slice(0, 200)})`);
       let result;
       try {
         result = await executeTool(fc.name, fc.args, convo);
       } catch (err) {
-        console.error(`Tool error (${fc.name}):`, err.message);
+        console.error(`  Tool error (${fc.name}):`, err.message);
         result = { error: err.message };
       }
       functionResponseParts.push(buildFunctionResponsePart(fc, result));
@@ -555,7 +722,8 @@ async function chat(userId, userMessage) {
     contents.push({ role: "user", parts: functionResponseParts });
   }
 
-  return "Something went sideways. Try asking again.";
+  console.error(`[${new Date().toISOString()}] Chat loop exhausted all 10 rounds`);
+  return "I got stuck in a loop trying to answer that. Try rephrasing or asking something more specific.";
 }
 
 // ==================== Lite Chat (scheduled updates, no memory) ====================
