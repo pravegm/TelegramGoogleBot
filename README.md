@@ -47,10 +47,19 @@ node bot.js                # start the bot
    - Google Docs API
    - Google Sheets API
    - Google Tasks API
-3. Go to **APIs & Services > Credentials**
-4. Click **Create Credentials > OAuth client ID**
-5. Select **Desktop app** as the application type
-6. Download the JSON file and save it as `~/.google-mcp/credentials.json`
+3. Set up the **OAuth consent screen** (APIs & Services > OAuth consent screen):
+   - Choose **External** user type
+   - Fill in app name and support email
+   - Add your Gmail address(es) as **test users**
+   - No need to publish -- "Testing" status works fine for personal use
+4. Go to **APIs & Services > Credentials**
+5. Click **Create Credentials > OAuth client ID**
+6. Select **Desktop app** as the application type
+7. Download the JSON file and save it as `~/.google-mcp/credentials.json`
+   
+   On macOS/Linux: `mkdir -p ~/.google-mcp && mv ~/Downloads/client_secret_*.json ~/.google-mcp/credentials.json`
+   
+   On Windows: save to `C:\Users\<you>\.google-mcp\credentials.json`
 
 ### 3. Configure Environment
 
@@ -81,7 +90,7 @@ For each account listed in `GOOGLE_ACCOUNTS`, run:
 node reauth.js account1
 ```
 
-This opens a browser window for Google OAuth. Sign in and grant access. The token is saved to `~/.google-mcp/tokens/account1.json`.
+This prints a Google OAuth URL. Open it in your browser, sign in, and grant access. The token is saved automatically to `~/.google-mcp/tokens/account1.json`.
 
 For multiple accounts:
 
@@ -91,6 +100,11 @@ node reauth.js account2    # sign in with second Google account
 ```
 
 Then set `GOOGLE_ACCOUNTS=account1,account2` in your `.env`.
+
+**Troubleshooting auth:**
+- "Something went wrong" -- make sure you've set up the OAuth consent screen (step 2.3) and added yourself as a test user
+- "Access blocked" -- your app is in testing mode, add the Gmail address as a test user in the consent screen settings
+- No refresh token -- revoke access at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) and re-run `reauth.js`
 
 ### 5. Run
 
