@@ -796,7 +796,46 @@ async function sendDeliveryUpdate() {
   }
 }
 
-cron.schedule("0 8 * * *", () => { sendDeliveryUpdate(); }, { timezone: "Europe/London" });
+async function sendMorningEmailDigest() {
+  console.log(`[${new Date().toISOString()}] Sending morning email digest...`);
+  try {
+    const [emails1, emails2] = await Promise.all([
+      searchEmails("account1", "newer_than:1d", 20),
+      searchEmails("account2", "newer_than:1d", 20),
+    ]);
+    const combined = [
+      ...emails1.map((e) => ({ ...e, account: "account1" })),
+      ...emails2.map((e) => ({ ...e, account: "account2" })),
+    ];
+    if (!combined.length) {
+      await bot.api.sendMessage(ALLOWED_USER_ID, "No emails in the last 24 hours.");
+      return;
+    }
+    const data = combined.map((e) => `[${e.account}] From: ${e.from} | Subject: ${e.subject} | Date: ${e.date} | Snippet: ${e.snippet}`).join("\n");
+    const prompt =
+      `Here are all emails from Praveg's two Google accounts in the past 24 hours:\n\n${data.slice(0, 10000)}\n\n` +
+      `Give a concise morning briefing. Group by what matters:\n` +
+      `1. Anything that needs IMMEDIATE action or response (urgent, time-sensitive, requires a reply)\n` +
+      `2. Important but not urgent (receipts, confirmations, newsletters worth reading)\n` +
+      `3. Ignorable (marketing, spam-like, automated notifications)\n\n` +
+      `If nothing is urgent, say so clearly. Use Telegram HTML formatting. Be direct and scannable.`;
+    const reply = await chatLite(prompt);
+    if (!reply) return;
+    const chunks = [];
+    if (reply.length > 4000) { for (let i = 0; i < reply.length; i += 4000) chunks.push(reply.slice(i, i + 4000)); }
+    else chunks.push(reply);
+    for (const chunk of chunks) {
+      try { await bot.api.sendMessage(ALLOWED_USER_ID, chunk, { parse_mode: "HTML" }); }
+      catch { await bot.api.sendMessage(ALLOWED_USER_ID, chunk.replace(/<[^>]*>/g, "")); }
+    }
+    console.log(`[${new Date().toISOString()}] Morning email digest sent`);
+  } catch (err) {
+    console.error("Email digest failed:", err.message);
+    try { await bot.api.sendMessage(ALLOWED_USER_ID, `Email digest failed: ${err.message}`); } catch {}
+  }
+}
+
+cron.schedule("0 8 * * *", () => { sendDeliveryUpdate(); sendMorningEmailDigest(); }, { timezone: "Europe/London" });
 
 cron.schedule("0 13 * * *", () => {
   sendScheduledUpdate(
@@ -821,5 +860,5 @@ bot.catch((err) => { console.error("Bot error:", err); });
 
 console.log(`Starting bot (chat: ${MODEL_HEAVY} w/ thinking HIGH | utility: ${MODEL_LITE})...`);
 console.log(`Tools: ${functionDeclarations.length} functions + Google Search`);
-console.log("Scheduled: 8am deliveries | 1pm world news | 7pm AI news");
+console.log("Scheduled: 8am deliveries+email digest | 1pm world news | 7pm AI news");
 bot.start();

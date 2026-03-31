@@ -13,7 +13,7 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 - **Delivery Tracking** -- scans emails for delivery/parcel updates across multiple accounts
 - **Voice Notes** -- transcribes voice messages and responds
 - **Web Search** -- answers general knowledge questions via Google Search grounding
-- **Scheduled Updates** -- daily delivery briefing (8am), world news (1pm), AI news (7pm)
+- **Scheduled Updates** -- morning email digest + delivery briefing (8am), world news (1pm), AI news (7pm)
 - **Multi-account** -- supports two Google accounts, switchable via commands
 - **Conversation Memory** -- rolling summarization to maintain context across messages
 
