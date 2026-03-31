@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Bot } from "grammy";
-import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel, FunctionCallingConfigMode } from "@google/genai";
 import cron from "node-cron";
 import {
   listEmails, readEmail, sendEmail, searchEmails,
@@ -23,21 +23,25 @@ const MODEL_HEAVY = "gemini-3-flash-preview";
 const MODEL_LITE = "gemini-2.5-flash-lite";
 
 function truncateResult(obj, maxLen = 30000) {
-  let json = JSON.stringify(obj);
+  const json = JSON.stringify(obj);
   if (json.length <= maxLen) return obj;
 
-  if (Array.isArray(obj)) {
-    const copy = [...obj];
-    while (copy.length > 1 && JSON.stringify(copy).length > maxLen) copy.pop();
-    return copy;
+  if (typeof obj === "string") return obj.slice(0, maxLen);
+
+  const arr = Array.isArray(obj) ? obj : (Array.isArray(obj?.result) ? obj.result : null);
+  if (arr) {
+    let lo = 1, hi = arr.length, best = 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const slice = arr.slice(0, mid);
+      const test = Array.isArray(obj) ? slice : { ...obj, result: slice };
+      if (JSON.stringify(test).length <= maxLen) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return Array.isArray(obj) ? arr.slice(0, best) : { ...obj, result: arr.slice(0, best) };
   }
 
   if (typeof obj === "object" && obj !== null) {
-    if (Array.isArray(obj.result)) {
-      const copy = { ...obj, result: [...obj.result] };
-      while (copy.result.length > 1 && JSON.stringify(copy).length > maxLen) copy.result.pop();
-      return copy;
-    }
     const copy = { ...obj };
     for (const key of Object.keys(copy)) {
       if (typeof copy[key] === "string" && copy[key].length > 1000) {
@@ -47,7 +51,6 @@ function truncateResult(obj, maxLen = 30000) {
     return copy;
   }
 
-  if (typeof obj === "string") return obj.slice(0, maxLen);
   return obj;
 }
 
@@ -151,7 +154,16 @@ function buildSystemPrompt(account, summary) {
     `- For general knowledge questions (weather, news, facts), use google_search.\n` +
     `- If a question is ambiguous, make your best guess and act. Don't ask for clarification on obvious things.\n` +
     `- Keep replies under 300 words unless the user explicitly asks for detail.\n` +
-    `</behaviour>`;
+    `</behaviour>\n\n` +
+    `<tool_usage>\n` +
+    `CRITICAL rules for using tools efficiently:\n` +
+    `- search_emails uses full Gmail query syntax. One good search is enough. Do NOT repeat similar searches with slightly different words.\n` +
+    `- After searching emails, read the most relevant 1-3 emails with read_email. Do NOT read more than 3 unless explicitly asked.\n` +
+    `- If a search returns no results, try ONE broader query. If that also fails, tell the user you couldn't find it.\n` +
+    `- Never call the same tool with the same or very similar arguments twice.\n` +
+    `- Aim to answer in 2-5 tool calls total. You have a maximum of 15.\n` +
+    `- When you have enough information to answer, STOP calling tools and respond immediately.\n` +
+    `</tool_usage>`;
 
   if (summary) {
     prompt += `\n\n<conversation_context>\nPrevious conversation summary:\n${summary}\n</conversation_context>`;
@@ -160,17 +172,17 @@ function buildSystemPrompt(account, summary) {
   return prompt;
 }
 
-// ==================== Tool Declarations (Gemini format) ====================
+// ==================== Tool Declarations (15 tools) ====================
 
 const functionDeclarations = [
   {
-    name: "list_emails",
-    description: "List emails from Gmail. Use for checking inbox, unread emails, etc.",
+    name: "search_emails",
+    description: "Search/list emails from Gmail. Supports full Gmail query syntax: 'is:unread', 'from:someone@email.com', 'subject:invoice newer_than:7d', 'has:attachment', 'BYD lease', etc.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account: 'account1' or 'account2'" },
-        query: { type: Type.STRING, description: "Gmail search query, e.g. 'is:unread', 'from:someone@email.com'" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        query: { type: Type.STRING, description: "Gmail search query" },
         maxResults: { type: Type.NUMBER, description: "Max emails to return (default 10)" },
       },
       required: ["account", "query"],
@@ -178,319 +190,137 @@ const functionDeclarations = [
   },
   {
     name: "read_email",
-    description: "Read full content of a specific email by message ID",
+    description: "Read full content of a specific email by its message ID (obtained from search_emails)",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
         messageId: { type: Type.STRING, description: "Gmail message ID" },
       },
       required: ["account", "messageId"],
     },
   },
   {
-    name: "send_email",
-    description: "Send a new email",
+    name: "manage_email",
+    description: "Send, reply to, archive, or trash an email",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        to: { type: Type.STRING, description: "Recipient email" },
-        subject: { type: Type.STRING, description: "Subject line" },
-        body: { type: Type.STRING, description: "Email body" },
-        cc: { type: Type.STRING, description: "CC recipients (optional)" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'send', 'reply', 'archive', or 'trash'" },
+        messageId: { type: Type.STRING, description: "Email ID (required for reply/archive/trash)" },
+        to: { type: Type.STRING, description: "Recipient (required for send)" },
+        subject: { type: Type.STRING, description: "Subject (required for send)" },
+        body: { type: Type.STRING, description: "Email body (required for send/reply)" },
+        cc: { type: Type.STRING, description: "CC recipients (optional, for send)" },
       },
-      required: ["account", "to", "subject", "body"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "reply_to_email",
-    description: "Reply to an existing email in its thread",
+    name: "calendar",
+    description: "List, create, update, or delete calendar events",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        messageId: { type: Type.STRING, description: "Email ID to reply to" },
-        body: { type: Type.STRING, description: "Reply text" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'list', 'create', 'update', or 'delete'" },
+        timeMin: { type: Type.STRING, description: "Start of range ISO format (for list)" },
+        timeMax: { type: Type.STRING, description: "End of range ISO format (for list)" },
+        eventId: { type: Type.STRING, description: "Event ID (for update/delete)" },
+        summary: { type: Type.STRING, description: "Event title (for create/update)" },
+        startTime: { type: Type.STRING, description: "Start time ISO (for create/update)" },
+        endTime: { type: Type.STRING, description: "End time ISO (for create/update)" },
+        description: { type: Type.STRING, description: "Event description (optional)" },
+        location: { type: Type.STRING, description: "Event location (optional)" },
       },
-      required: ["account", "messageId", "body"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "archive_email",
-    description: "Archive an email (remove from inbox)",
+    name: "drive_search",
+    description: "Search Drive files by name/content, list recent files, or get folder tree structure",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        messageId: { type: Type.STRING, description: "Gmail message ID to archive" },
-      },
-      required: ["account", "messageId"],
-    },
-  },
-  {
-    name: "trash_email",
-    description: "Move an email to trash",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        messageId: { type: Type.STRING, description: "Gmail message ID to trash" },
-      },
-      required: ["account", "messageId"],
-    },
-  },
-  {
-    name: "search_emails",
-    description: "Search emails with Gmail query syntax",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        query: { type: Type.STRING, description: "Gmail search query" },
-        maxResults: { type: Type.NUMBER, description: "Max results (default 10)" },
-      },
-      required: ["account", "query"],
-    },
-  },
-  {
-    name: "list_calendar_events",
-    description: "List calendar events in a date range",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        timeMin: { type: Type.STRING, description: "Start time ISO format" },
-        timeMax: { type: Type.STRING, description: "End time ISO format" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'search', 'list', or 'tree'" },
+        query: { type: Type.STRING, description: "Search term (for search)" },
+        folderId: { type: Type.STRING, description: "Folder ID for tree (default: root)" },
         maxResults: { type: Type.NUMBER, description: "Max results (default 15)" },
       },
-      required: ["account", "timeMin", "timeMax"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "create_calendar_event",
-    description: "Create a new calendar event",
+    name: "drive_manage",
+    description: "Move, rename, copy, delete files/folders, or create folders in Google Drive",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        summary: { type: Type.STRING, description: "Event title" },
-        startTime: { type: Type.STRING, description: "Start time ISO format" },
-        endTime: { type: Type.STRING, description: "End time ISO format" },
-        description: { type: Type.STRING, description: "Event description" },
-        location: { type: Type.STRING, description: "Event location" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'move', 'rename', 'copy', 'delete', or 'create_folder'" },
+        fileId: { type: Type.STRING, description: "File/folder ID (for move/rename/copy/delete)" },
+        newParentId: { type: Type.STRING, description: "Destination folder ID (for move)" },
+        name: { type: Type.STRING, description: "New name (for rename/copy/create_folder)" },
+        parentId: { type: Type.STRING, description: "Parent folder ID (for create_folder, default: root)" },
       },
-      required: ["account", "summary", "startTime", "endTime"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "delete_calendar_event",
-    description: "Delete a calendar event",
+    name: "document",
+    description: "Read, create, or append text to a Google Doc",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        eventId: { type: Type.STRING, description: "Calendar event ID to delete" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'read', 'create', or 'append'" },
+        docId: { type: Type.STRING, description: "Doc ID (for read/append)" },
+        title: { type: Type.STRING, description: "Document title (for create)" },
+        text: { type: Type.STRING, description: "Content to write (for create body or append)" },
       },
-      required: ["account", "eventId"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "list_drive_files",
-    description: "List recent files from Google Drive",
+    name: "spreadsheet",
+    description: "Read, create, append rows, or update cells in a Google Sheet",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        maxResults: { type: Type.NUMBER, description: "Max results (default 15)" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'read', 'create', 'append', or 'update'" },
+        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID (for read/append/update)" },
+        title: { type: Type.STRING, description: "Title (for create)" },
+        range: { type: Type.STRING, description: "Cell range A1 notation (default: 'Sheet1')" },
+        rows: { type: Type.ARRAY, description: "Rows to append, e.g. [['A','B'],['C','D']]", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
+        values: { type: Type.ARRAY, description: "Values to write (for update)", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
       },
-      required: ["account"],
+      required: ["account", "action"],
     },
   },
   {
-    name: "search_drive_files",
-    description: "Search Google Drive files",
+    name: "tasks",
+    description: "List task lists, list tasks, create, complete, update, or delete a task in Google Tasks",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        query: { type: Type.STRING, description: "Search query" },
-        maxResults: { type: Type.NUMBER, description: "Max results" },
+        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        action: { type: Type.STRING, description: "'list_lists', 'list', 'create', 'complete', 'update', or 'delete'" },
+        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
+        taskId: { type: Type.STRING, description: "Task ID (for complete/update/delete)" },
+        title: { type: Type.STRING, description: "Task title (for create/update)" },
+        notes: { type: Type.STRING, description: "Task notes (for create/update)" },
+        due: { type: Type.STRING, description: "Due date e.g. '2026-04-01' (for create/update)" },
+        showCompleted: { type: Type.BOOLEAN, description: "Include completed tasks (for list)" },
       },
-      required: ["account", "query"],
-    },
-  },
-  {
-    name: "list_folder_tree",
-    description: "Get the folder structure of Google Drive as a tree. Use this when the user asks about their Drive layout, folder hierarchy, or file organisation.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        folderId: { type: Type.STRING, description: "Folder ID to start from (default: 'root' for top-level)" },
-        maxDepth: { type: Type.NUMBER, description: "How many levels deep to recurse (default: 3, max: 4)" },
-      },
-      required: ["account"],
-    },
-  },
-  {
-    name: "move_file",
-    description: "Move a file or folder to a different folder in Google Drive",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        fileId: { type: Type.STRING, description: "ID of the file/folder to move" },
-        newParentId: { type: Type.STRING, description: "ID of the destination folder" },
-      },
-      required: ["account", "fileId", "newParentId"],
-    },
-  },
-  {
-    name: "rename_file",
-    description: "Rename a file or folder in Google Drive",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        fileId: { type: Type.STRING, description: "ID of the file/folder to rename" },
-        newName: { type: Type.STRING, description: "New name for the file/folder" },
-      },
-      required: ["account", "fileId", "newName"],
-    },
-  },
-  {
-    name: "create_folder",
-    description: "Create a new folder in Google Drive",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        name: { type: Type.STRING, description: "Folder name" },
-        parentId: { type: Type.STRING, description: "Parent folder ID (default: root)" },
-      },
-      required: ["account", "name"],
-    },
-  },
-  {
-    name: "delete_file",
-    description: "Permanently delete a file or folder from Google Drive",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        fileId: { type: Type.STRING, description: "ID of the file/folder to delete" },
-      },
-      required: ["account", "fileId"],
-    },
-  },
-  {
-    name: "copy_file",
-    description: "Copy a file in Google Drive, optionally with a new name",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        fileId: { type: Type.STRING, description: "ID of the file to copy" },
-        newName: { type: Type.STRING, description: "Name for the copy (optional)" },
-      },
-      required: ["account", "fileId"],
-    },
-  },
-  {
-    name: "read_document",
-    description: "Read a Google Doc's content",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        docId: { type: Type.STRING, description: "Google Doc ID" },
-      },
-      required: ["account", "docId"],
-    },
-  },
-  {
-    name: "create_document",
-    description: "Create a new Google Doc with optional initial content",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        title: { type: Type.STRING, description: "Document title" },
-        body: { type: Type.STRING, description: "Initial text content (optional)" },
-      },
-      required: ["account", "title"],
-    },
-  },
-  {
-    name: "append_to_document",
-    description: "Append text to the end of an existing Google Doc",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        docId: { type: Type.STRING, description: "Google Doc ID" },
-        text: { type: Type.STRING, description: "Text to append" },
-      },
-      required: ["account", "docId", "text"],
-    },
-  },
-  {
-    name: "read_spreadsheet",
-    description: "Read data from a Google Sheet",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID" },
-        range: { type: Type.STRING, description: "Cell range (default: 'Sheet1')" },
-      },
-      required: ["account", "spreadsheetId"],
-    },
-  },
-  {
-    name: "append_to_sheet",
-    description: "Append rows to a Google Sheet. Each row is an array of values.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID" },
-        range: { type: Type.STRING, description: "Sheet range in A1 notation (default: 'Sheet1')" },
-        rows: { type: Type.ARRAY, description: "Array of rows to append, e.g. [['Name','Age'],['Praveg','25']]", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
-      },
-      required: ["account", "spreadsheetId", "rows"],
-    },
-  },
-  {
-    name: "update_sheet_cells",
-    description: "Update specific cells in a Google Sheet",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID" },
-        range: { type: Type.STRING, description: "Cell range in A1 notation, e.g. 'Sheet1!A1:B2'" },
-        values: { type: Type.ARRAY, description: "2D array of values to write", items: { type: Type.ARRAY, items: { type: Type.STRING } } },
-      },
-      required: ["account", "spreadsheetId", "range", "values"],
-    },
-  },
-  {
-    name: "create_spreadsheet",
-    description: "Create a new Google Spreadsheet",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        title: { type: Type.STRING, description: "Spreadsheet title" },
-      },
-      required: ["account", "title"],
+      required: ["account", "action"],
     },
   },
   {
     name: "switch_account",
-    description: "Switch the active Google account",
+    description: "Switch the active Google account for subsequent operations",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -501,89 +331,8 @@ const functionDeclarations = [
   },
   {
     name: "get_delivery_status",
-    description: "Get delivery/parcel tracking status. Searches both Google accounts for delivery emails from the past 7 days and extracts tracking info. Use whenever the user asks about deliveries, parcels, packages, or tracking.",
+    description: "Get delivery/parcel tracking status. Searches both Google accounts for delivery emails from the past 7 days. Use whenever the user asks about deliveries, parcels, packages, or tracking.",
     parameters: { type: Type.OBJECT, properties: {} },
-  },
-  {
-    name: "list_task_lists",
-    description: "List all Google Tasks lists for an account",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-      },
-      required: ["account"],
-    },
-  },
-  {
-    name: "list_tasks",
-    description: "List tasks from a Google Tasks list. Defaults to the primary list.",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default' for primary list)" },
-        showCompleted: { type: Type.BOOLEAN, description: "Whether to include completed tasks (default: false)" },
-      },
-      required: ["account"],
-    },
-  },
-  {
-    name: "create_task",
-    description: "Create a new task in Google Tasks",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
-        title: { type: Type.STRING, description: "Task title" },
-        notes: { type: Type.STRING, description: "Task notes/details (optional)" },
-        due: { type: Type.STRING, description: "Due date, e.g. '2026-04-01' (optional)" },
-      },
-      required: ["account", "title"],
-    },
-  },
-  {
-    name: "complete_task",
-    description: "Mark a task as completed",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
-        taskId: { type: Type.STRING, description: "Task ID to complete" },
-      },
-      required: ["account", "taskId"],
-    },
-  },
-  {
-    name: "update_task",
-    description: "Update a task's title, notes, or due date",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
-        taskId: { type: Type.STRING, description: "Task ID to update" },
-        title: { type: Type.STRING, description: "New title (optional)" },
-        notes: { type: Type.STRING, description: "New notes (optional)" },
-        due: { type: Type.STRING, description: "New due date (optional)" },
-      },
-      required: ["account", "taskId"],
-    },
-  },
-  {
-    name: "delete_task",
-    description: "Delete a task from Google Tasks",
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        account: { type: Type.STRING, description: "Google account name" },
-        taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
-        taskId: { type: Type.STRING, description: "Task ID to delete" },
-      },
-      required: ["account", "taskId"],
-    },
   },
 ];
 
@@ -596,47 +345,90 @@ const toolsConfig = [
 
 async function executeTool(name, args, convo) {
   switch (name) {
-    case "list_emails": return await listEmails(args.account, args.query, args.maxResults || 10);
-    case "read_email": return await readEmail(args.account, args.messageId);
-    case "send_email": return await sendEmail(args.account, args.to, args.subject, args.body, args.cc || "");
-    case "reply_to_email": return await replyToEmail(args.account, args.messageId, args.body);
-    case "archive_email": return await archiveEmail(args.account, args.messageId);
-    case "trash_email": return await trashEmail(args.account, args.messageId);
     case "search_emails": return await searchEmails(args.account, args.query, args.maxResults || 10);
-    case "list_calendar_events": return await listEvents(args.account, args.timeMin, args.timeMax, args.maxResults || 15);
-    case "create_calendar_event": return await createEvent(args.account, args.summary, args.startTime, args.endTime, args.description || "", args.location || "");
-    case "delete_calendar_event": return await deleteEvent(args.account, args.eventId);
-    case "list_drive_files": return await listFiles(args.account, args.maxResults || 15);
-    case "search_drive_files": return await searchFiles(args.account, args.query, args.maxResults || 15);
-    case "move_file": return await moveFile(args.account, args.fileId, args.newParentId);
-    case "rename_file": return await renameFile(args.account, args.fileId, args.newName);
-    case "create_folder": return await createFolder(args.account, args.name, args.parentId || "root");
-    case "delete_file": return await deleteFile(args.account, args.fileId);
-    case "copy_file": return await copyFile(args.account, args.fileId, args.newName || "");
-    case "read_document": return await readDoc(args.account, args.docId);
-    case "create_document": return await createDocument(args.account, args.title, args.body || "");
-    case "append_to_document": return await appendToDocument(args.account, args.docId, args.text);
-    case "read_spreadsheet": return await readSheet(args.account, args.spreadsheetId, args.range || "Sheet1");
-    case "append_to_sheet": return await appendToSheet(args.account, args.spreadsheetId, args.range || "Sheet1", args.rows);
-    case "update_sheet_cells": return await updateSheetCells(args.account, args.spreadsheetId, args.range, args.values);
-    case "create_spreadsheet": return await createSpreadsheet(args.account, args.title);
+    case "read_email": return await readEmail(args.account, args.messageId);
+    case "manage_email": {
+      switch (args.action) {
+        case "send": return await sendEmail(args.account, args.to, args.subject, args.body, args.cc || "");
+        case "reply": return await replyToEmail(args.account, args.messageId, args.body);
+        case "archive": return await archiveEmail(args.account, args.messageId);
+        case "trash": return await trashEmail(args.account, args.messageId);
+        default: return { error: `Unknown email action: ${args.action}` };
+      }
+    }
+    case "calendar": {
+      switch (args.action) {
+        case "list": return await listEvents(args.account, args.timeMin, args.timeMax, args.maxResults || 15);
+        case "create": return await createEvent(args.account, args.summary, args.startTime, args.endTime, args.description || "", args.location || "");
+        case "update": {
+          const updates = {};
+          if (args.summary) updates.summary = args.summary;
+          if (args.description) updates.description = args.description;
+          if (args.location) updates.location = args.location;
+          if (args.startTime) updates.start = { dateTime: args.startTime, timeZone: "Europe/London" };
+          if (args.endTime) updates.end = { dateTime: args.endTime, timeZone: "Europe/London" };
+          return await updateEvent(args.account, args.eventId, updates);
+        }
+        case "delete": return await deleteEvent(args.account, args.eventId);
+        default: return { error: `Unknown calendar action: ${args.action}` };
+      }
+    }
+    case "drive_search": {
+      switch (args.action) {
+        case "search": return await searchFiles(args.account, args.query, args.maxResults || 15);
+        case "list": return await listFiles(args.account, args.maxResults || 15);
+        case "tree": return await listFolderTree(args.account, args.folderId || "root", 0, 3);
+        default: return { error: `Unknown drive_search action: ${args.action}` };
+      }
+    }
+    case "drive_manage": {
+      switch (args.action) {
+        case "move": return await moveFile(args.account, args.fileId, args.newParentId);
+        case "rename": return await renameFile(args.account, args.fileId, args.name);
+        case "copy": return await copyFile(args.account, args.fileId, args.name || "");
+        case "delete": return await deleteFile(args.account, args.fileId);
+        case "create_folder": return await createFolder(args.account, args.name, args.parentId || "root");
+        default: return { error: `Unknown drive_manage action: ${args.action}` };
+      }
+    }
+    case "document": {
+      switch (args.action) {
+        case "read": return await readDoc(args.account, args.docId);
+        case "create": return await createDocument(args.account, args.title, args.text || "");
+        case "append": return await appendToDocument(args.account, args.docId, args.text);
+        default: return { error: `Unknown document action: ${args.action}` };
+      }
+    }
+    case "spreadsheet": {
+      switch (args.action) {
+        case "read": return await readSheet(args.account, args.spreadsheetId, args.range || "Sheet1");
+        case "create": return await createSpreadsheet(args.account, args.title);
+        case "append": return await appendToSheet(args.account, args.spreadsheetId, args.range || "Sheet1", args.rows);
+        case "update": return await updateSheetCells(args.account, args.spreadsheetId, args.range, args.values);
+        default: return { error: `Unknown spreadsheet action: ${args.action}` };
+      }
+    }
+    case "tasks": {
+      switch (args.action) {
+        case "list_lists": return await listTaskLists(args.account);
+        case "list": return await listTasks(args.account, args.taskListId || "@default", args.showCompleted || false);
+        case "create": return await createTask(args.account, args.taskListId || "@default", args.title, args.notes || "", args.due || "");
+        case "complete": return await completeTask(args.account, args.taskListId || "@default", args.taskId);
+        case "update": {
+          const updates = {};
+          if (args.title) updates.title = args.title;
+          if (args.notes) updates.notes = args.notes;
+          if (args.due) updates.due = new Date(args.due).toISOString();
+          return await updateTask(args.account, args.taskListId || "@default", args.taskId, updates);
+        }
+        case "delete": return await deleteTask(args.account, args.taskListId || "@default", args.taskId);
+        default: return { error: `Unknown tasks action: ${args.action}` };
+      }
+    }
     case "switch_account":
       if (convo) convo.account = args.account;
       return { switched: true, account: args.account };
-    case "list_folder_tree": return await listFolderTree(args.account, args.folderId || "root", 0, Math.min(args.maxDepth || 3, 4));
     case "get_delivery_status": return await getDeliveryStatus();
-    case "list_task_lists": return await listTaskLists(args.account);
-    case "list_tasks": return await listTasks(args.account, args.taskListId || "@default", args.showCompleted || false);
-    case "create_task": return await createTask(args.account, args.taskListId || "@default", args.title, args.notes || "", args.due || "");
-    case "complete_task": return await completeTask(args.account, args.taskListId || "@default", args.taskId);
-    case "update_task": {
-      const updates = {};
-      if (args.title) updates.title = args.title;
-      if (args.notes) updates.notes = args.notes;
-      if (args.due) updates.due = new Date(args.due).toISOString();
-      return await updateTask(args.account, args.taskListId || "@default", args.taskId, updates);
-    }
-    case "delete_task": return await deleteTask(args.account, args.taskListId || "@default", args.taskId);
     default: return { error: `Unknown tool: ${name}` };
   }
 }
@@ -655,21 +447,27 @@ function buildFunctionResponsePart(fc, result) {
 
 // ==================== Chat Engine (Gemini 3 Flash) ====================
 
+function extractText(parts) {
+  return (parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("").trim();
+}
+
 async function chat(userId, userMessage) {
   const convo = getConvo(userId);
   await compactHistory(convo);
 
   const systemPrompt = buildSystemPrompt(convo.account, convo.summary);
 
-  convo.history.push({
+  const userEntry = {
     role: "user",
     parts: [{ text: `[Active account: ${convo.account}]\n${userMessage}` }],
-  });
+  };
 
-  const contents = [...convo.history];
+  const contents = [...convo.history, userEntry];
 
-  let rounds = 10;
-  while (rounds-- > 0) {
+  const MAX_TOOL_ROUNDS = 15;
+  let lastModelText = "";
+
+  for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
     let response;
     try {
       response = await genai.models.generateContent({
@@ -683,14 +481,23 @@ async function chat(userId, userMessage) {
         },
       });
     } catch (apiErr) {
-      console.error(`[${new Date().toISOString()}] Gemini API error (round ${10 - rounds}):`, apiErr.message);
-      convo.history.push({ role: "model", parts: [{ text: `API error: ${apiErr.message}` }] });
+      console.error(`[${new Date().toISOString()}] Gemini API error (round ${round}):`, apiErr.message);
       return `Something broke on the AI side: ${apiErr.message}`;
     }
 
     const candidate = response.candidates?.[0];
+    const finishReason = candidate?.finishReason || "unknown";
+
     if (!candidate?.content?.parts) {
-      console.error(`[${new Date().toISOString()}] Empty candidate (round ${10 - rounds}), finishReason: ${candidate?.finishReason || "unknown"}`);
+      if (finishReason === "SAFETY") {
+        console.error(`[${new Date().toISOString()}] Blocked by safety filter (round ${round})`);
+        return "That request was blocked by Google's safety filters. Try rephrasing.";
+      }
+      if (finishReason === "RECITATION") {
+        console.error(`[${new Date().toISOString()}] Blocked by recitation filter (round ${round})`);
+        return "Response blocked due to content policy. Try a different question.";
+      }
+      console.error(`[${new Date().toISOString()}] Empty candidate (round ${round}), finishReason: ${finishReason}`);
       break;
     }
 
@@ -699,13 +506,24 @@ async function chat(userId, userMessage) {
 
     const functionCalls = response.functionCalls;
     if (!functionCalls || functionCalls.length === 0) {
-      const textParts = parts.filter((p) => p.text && !p.thought);
-      const text = textParts.map((p) => p.text).join("") || "";
-      convo.history.push({ role: "model", parts: [{ text }] });
-      return text;
+      const text = extractText(parts);
+      if (text) {
+        convo.history.push(userEntry);
+        convo.history.push({ role: "model", parts: [{ text }] });
+        return text;
+      }
+      if (lastModelText) {
+        convo.history.push(userEntry);
+        convo.history.push({ role: "model", parts: [{ text: lastModelText }] });
+        return lastModelText;
+      }
+      break;
     }
 
-    console.log(`[${new Date().toISOString()}] Round ${10 - rounds}: ${functionCalls.map(fc => fc.name).join(", ")}`);
+    const inlineText = extractText(parts);
+    if (inlineText) lastModelText = inlineText;
+
+    console.log(`[${new Date().toISOString()}] Round ${round}: ${functionCalls.map(fc => fc.name).join(", ")}`);
     const functionResponseParts = [];
     for (const fc of functionCalls) {
       console.log(`  Tool: ${fc.name}(${JSON.stringify(fc.args).slice(0, 200)})`);
@@ -722,69 +540,87 @@ async function chat(userId, userMessage) {
     contents.push({ role: "user", parts: functionResponseParts });
   }
 
-  console.error(`[${new Date().toISOString()}] Chat loop exhausted all 10 rounds`);
-  return "I got stuck in a loop trying to answer that. Try rephrasing or asking something more specific.";
+  console.log(`[${new Date().toISOString()}] Forcing final answer after ${MAX_TOOL_ROUNDS} tool rounds`);
+  try {
+    contents.push({
+      role: "user",
+      parts: [{ text: "You have used all available tool calls. Based on everything you've gathered so far, give your best answer now. Do NOT say you need more information -- summarise what you found." }],
+    });
+    const finalResponse = await genai.models.generateContent({
+      model: MODEL_HEAVY,
+      contents,
+      config: {
+        systemInstruction: systemPrompt,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+      },
+    });
+
+    const finalCandidate = finalResponse.candidates?.[0];
+    if (finalCandidate?.finishReason === "SAFETY") return "That request was blocked by Google's safety filters. Try rephrasing.";
+
+    const text = extractText(finalCandidate?.content?.parts);
+    if (text) {
+      convo.history.push(userEntry);
+      convo.history.push({ role: "model", parts: [{ text }] });
+      return text;
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Forced answer failed:`, err.message);
+  }
+
+  if (lastModelText) {
+    convo.history.push(userEntry);
+    convo.history.push({ role: "model", parts: [{ text: lastModelText }] });
+    return lastModelText;
+  }
+
+  return "I couldn't get a clear answer for that one. Try rephrasing or asking something more specific.";
 }
 
 // ==================== Lite Chat (scheduled updates, no memory) ====================
 
-async function chatLite(prompt) {
+function liteSysPrompt() {
   const today = new Date().toLocaleDateString("en-GB", {
     weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Europe/London",
   });
-
-  const systemPrompt =
-    `You are Praveg's personal assistant. Today is ${today}. Timezone: Europe/London.\n` +
+  return `You are Praveg's personal assistant. Today is ${today}. Timezone: Europe/London.\n` +
     `Format replies using Telegram HTML: <b>bold</b> for headings, <i>italic</i> for dates.\n` +
     `Keep it concise and scannable. No asterisks, no markdown, no bullets. Separate items with blank lines.`;
+}
 
-  const response = await genai.models.generateContent({
-    model: MODEL_LITE,
-    contents: prompt,
-    config: {
-      systemInstruction: systemPrompt,
-      tools: [{ functionDeclarations }, { googleSearch: {} }],
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  });
-
-  const functionCalls = response.functionCalls;
-  if (functionCalls && functionCalls.length > 0) {
-    const contents = [
-      { role: "user", parts: [{ text: prompt }] },
-      response.candidates[0].content,
-    ];
-
-    const functionResponseParts = [];
-    for (const fc of functionCalls) {
-      console.log(`Lite tool: ${fc.name}(${JSON.stringify(fc.args).slice(0, 200)})`);
-      let result;
-      try {
-        result = await executeTool(fc.name, fc.args, null);
-      } catch (err) {
-        console.error(`Lite tool error (${fc.name}):`, err.message);
-        result = { error: err.message };
-      }
-      functionResponseParts.push(buildFunctionResponsePart(fc, result));
-    }
-    contents.push({ role: "user", parts: functionResponseParts });
-
-    const followUp = await genai.models.generateContent({
+async function chatLite(prompt) {
+  try {
+    const response = await genai.models.generateContent({
       model: MODEL_LITE,
-      contents,
+      contents: prompt,
       config: {
-        systemInstruction: systemPrompt,
-        tools: [{ functionDeclarations }, { googleSearch: {} }],
+        systemInstruction: liteSysPrompt(),
         thinkingConfig: { thinkingBudget: 0 },
       },
     });
-
-    const fParts = followUp.candidates?.[0]?.content?.parts || [];
-    return fParts.filter((p) => p.text && !p.thought).map((p) => p.text).join("") || "";
+    return extractText(response.candidates?.[0]?.content?.parts);
+  } catch (err) {
+    console.error("chatLite error:", err.message);
+    return "";
   }
+}
 
-  const rParts = response.candidates?.[0]?.content?.parts || [];
-  return rParts.filter((p) => p.text && !p.thought).map((p) => p.text).join("") || "";
+async function chatLiteWithSearch(prompt) {
+  try {
+    const response = await genai.models.generateContent({
+      model: MODEL_LITE,
+      contents: prompt,
+      config: {
+        systemInstruction: liteSysPrompt(),
+        tools: [{ googleSearch: {} }],
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    });
+    return extractText(response.candidates?.[0]?.content?.parts);
+  } catch (err) {
+    console.error("chatLiteWithSearch error:", err.message);
+    return "";
+  }
 }
 
 // ==================== Voice Transcription (Gemini Lite) ====================
@@ -868,12 +704,12 @@ bot.on("message:text", async (ctx) => {
   const typingInterval = setInterval(() => { ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {}); }, 4000);
   try {
     const reply = await chat(ctx.from.id, text);
-    clearInterval(typingInterval);
     await sendFormattedReply(ctx, reply);
   } catch (err) {
-    clearInterval(typingInterval);
     console.error("Error:", err);
     await ctx.reply(`Something broke: ${err.message}`);
+  } finally {
+    clearInterval(typingInterval);
   }
 });
 
@@ -890,12 +726,12 @@ bot.on("message:voice", async (ctx) => {
     if (!transcription) { clearInterval(typingInterval); await ctx.reply("Couldn't catch that. Try again?"); return; }
     await sendFormattedReply(ctx, `<i>"${transcription}"</i>`);
     const reply = await chat(ctx.from.id, transcription);
-    clearInterval(typingInterval);
     await sendFormattedReply(ctx, reply);
   } catch (err) {
-    clearInterval(typingInterval);
     console.error("Voice error:", err);
     await ctx.reply(`Something broke: ${err.message}`);
+  } finally {
+    clearInterval(typingInterval);
   }
 });
 
@@ -906,12 +742,12 @@ bot.on("callback_query:data", async (ctx) => {
   const typingInterval = setInterval(() => { ctx.api.sendChatAction(ctx.chat.id, "typing").catch(() => {}); }, 4000);
   try {
     const reply = await chat(ctx.from.id, data);
-    clearInterval(typingInterval);
     await sendFormattedReply(ctx, reply);
   } catch (err) {
-    clearInterval(typingInterval);
     console.error("Callback error:", err);
     await ctx.reply(`Something broke: ${err.message}`);
+  } finally {
+    clearInterval(typingInterval);
   }
 });
 
@@ -920,9 +756,9 @@ bot.on("callback_query:data", async (ctx) => {
 async function sendScheduledUpdate(prompt, label) {
   console.log(`[${new Date().toISOString()}] Sending ${label}...`);
   try {
-    const reply = await chatLite(prompt);
+    const reply = await chatLiteWithSearch(prompt);
     if (!reply || reply.length === 0) {
-      console.error(`${label}: empty response from chatLite`);
+      console.error(`${label}: empty response from chatLiteWithSearch`);
       return;
     }
     const chunks = [];
@@ -978,8 +814,12 @@ cron.schedule("0 19 * * *", () => {
 
 // ==================== Error Handling & Start ====================
 
+process.on("unhandledRejection", (err) => { console.error("Unhandled rejection:", err); });
+process.on("uncaughtException", (err) => { console.error("Uncaught exception:", err); });
+
 bot.catch((err) => { console.error("Bot error:", err); });
 
 console.log(`Starting bot (chat: ${MODEL_HEAVY} w/ thinking HIGH | utility: ${MODEL_LITE})...`);
+console.log(`Tools: ${functionDeclarations.length} functions + Google Search`);
 console.log("Scheduled: 8am deliveries | 1pm world news | 7pm AI news");
 bot.start();

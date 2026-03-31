@@ -135,17 +135,12 @@ export async function readEmail(account, messageId) {
 export async function sendEmail(account, to, subject, body, cc = "", bcc = "") {
   const gmail = google.gmail({ version: "v1", auth: getAuth(account) });
 
-  const lines = [
-    `To: ${to}`,
-    cc ? `Cc: ${cc}` : "",
-    bcc ? `Bcc: ${bcc}` : "",
-    `Subject: ${subject}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "",
-    body,
-  ]
-    .filter(Boolean)
-    .join("\r\n");
+  const headers = [`To: ${to}`];
+  if (cc) headers.push(`Cc: ${cc}`);
+  if (bcc) headers.push(`Bcc: ${bcc}`);
+  headers.push(`Subject: ${subject}`);
+  headers.push("Content-Type: text/plain; charset=utf-8");
+  const lines = [...headers, "", body].join("\r\n");
 
   const raw = Buffer.from(lines).toString("base64url");
 
@@ -204,6 +199,7 @@ export async function createEvent(account, summary, startTime, endTime, descript
 export async function listFiles(account, maxResults = 15) {
   const drive = google.drive({ version: "v3", auth: getAuth(account) });
   const res = await drive.files.list({
+    q: "trashed = false",
     pageSize: maxResults,
     orderBy: "modifiedTime desc",
     fields: "files(id,name,mimeType,modifiedTime,webViewLink)",
@@ -213,17 +209,33 @@ export async function listFiles(account, maxResults = 15) {
 
 export async function searchFiles(account, query, maxResults = 15) {
   const drive = google.drive({ version: "v3", auth: getAuth(account) });
-  const escaped = query.replace(/'/g, "\\'");
-  const res = await drive.files.list({
-    q: `(name contains '${escaped}' or fullText contains '${escaped}') and trashed = false`,
-    pageSize: maxResults,
-    orderBy: "modifiedTime desc",
-    fields: "files(id,name,mimeType,modifiedTime,webViewLink,parents)",
-  });
-  return res.data.files || [];
+  const escaped = query.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  try {
+    const res = await drive.files.list({
+      q: `(name contains '${escaped}' or fullText contains '${escaped}') and trashed = false`,
+      pageSize: maxResults,
+      orderBy: "modifiedTime desc",
+      fields: "files(id,name,mimeType,modifiedTime,webViewLink,parents)",
+    });
+    return res.data.files || [];
+  } catch {
+    const res = await drive.files.list({
+      q: `name contains '${escaped}' and trashed = false`,
+      pageSize: maxResults,
+      orderBy: "modifiedTime desc",
+      fields: "files(id,name,mimeType,modifiedTime,webViewLink,parents)",
+    });
+    return res.data.files || [];
+  }
 }
 
+const folderTreeCounter = { count: 0 };
+const FOLDER_TREE_MAX_ITEMS = 500;
+
 export async function listFolderTree(account, folderId = "root", depth = 0, maxDepth = 3) {
+  if (depth === 0) folderTreeCounter.count = 0;
+  if (folderTreeCounter.count >= FOLDER_TREE_MAX_ITEMS) return [{ name: "(truncated -- too many items)", type: "notice" }];
+
   const drive = google.drive({ version: "v3", auth: getAuth(account) });
   const res = await drive.files.list({
     q: `'${folderId}' in parents and trashed = false`,
@@ -234,6 +246,11 @@ export async function listFolderTree(account, folderId = "root", depth = 0, maxD
 
   const items = [];
   for (const f of res.data.files || []) {
+    if (folderTreeCounter.count >= FOLDER_TREE_MAX_ITEMS) {
+      items.push({ name: `(${(res.data.files.length - items.length)} more items truncated)`, type: "notice" });
+      break;
+    }
+    folderTreeCounter.count++;
     const isFolder = f.mimeType === "application/vnd.google-apps.folder";
     const entry = { name: f.name, id: f.id, type: isFolder ? "folder" : "file" };
     if (isFolder && depth < maxDepth) {

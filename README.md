@@ -4,18 +4,36 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 
 ## Features
 
-- **Gmail** -- list, read, search, send, reply, archive, and trash emails
+- **Gmail** -- search, read, send, reply, archive, and trash emails
 - **Google Calendar** -- list, create, update, and delete events
-- **Google Drive** -- list, search, move, rename, copy, and delete files; create folders; browse folder tree
+- **Google Drive** -- search, browse folder tree, move, rename, copy, delete files, create folders
 - **Google Docs** -- read, create, and append to documents
 - **Google Sheets** -- read, create, append rows, and update cells
-- **Google Tasks** -- list, create, complete, update, and delete tasks
+- **Google Tasks** -- list task lists, list/create/complete/update/delete tasks
 - **Delivery Tracking** -- scans emails for delivery/parcel updates across multiple accounts
 - **Voice Notes** -- transcribes voice messages and responds
 - **Web Search** -- answers general knowledge questions via Google Search grounding
 - **Scheduled Updates** -- daily delivery briefing (8am), world news (1pm), AI news (7pm)
 - **Multi-account** -- supports two Google accounts, switchable via commands
 - **Conversation Memory** -- rolling summarization to maintain context across messages
+
+## Architecture
+
+11 consolidated function tools + Google Search (reduced from 33 individual tools to prevent model confusion):
+
+| Tool | Actions |
+|------|---------|
+| `search_emails` | Search/list emails with Gmail query syntax |
+| `read_email` | Read full email content by ID |
+| `manage_email` | send, reply, archive, trash |
+| `calendar` | list, create, update, delete |
+| `drive_search` | search, list, tree |
+| `drive_manage` | move, rename, copy, delete, create_folder |
+| `document` | read, create, append |
+| `spreadsheet` | read, create, append, update |
+| `tasks` | list_lists, list, create, complete, update, delete |
+| `switch_account` | Switch active Google account |
+| `get_delivery_status` | Scan both accounts for delivery emails |
 
 ## Models
 
