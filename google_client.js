@@ -1,10 +1,13 @@
-import { readFileSync } from "fs";
+import "dotenv/config";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { google } from "googleapis";
 
-const TOKEN_DIR = join(homedir(), ".google-mcp", "tokens");
-const CREDS_PATH = join(homedir(), ".google-mcp", "credentials.json");
+const GOOGLE_CREDS_DIR = process.env.GOOGLE_CREDS_DIR || join(homedir(), ".google-mcp");
+const TOKEN_DIR = join(GOOGLE_CREDS_DIR, "tokens");
+const CREDS_PATH = join(GOOGLE_CREDS_DIR, "credentials.json");
+const TIMEZONE = process.env.TIMEZONE || "UTC";
 
 function loadCredentials() {
   const raw = JSON.parse(readFileSync(CREDS_PATH, "utf-8"));
@@ -185,8 +188,8 @@ export async function createEvent(account, summary, startTime, endTime, descript
     calendarId: "primary",
     requestBody: {
       summary,
-      start: { dateTime: startTime, timeZone: "Europe/London" },
-      end: { dateTime: endTime, timeZone: "Europe/London" },
+      start: { dateTime: startTime, timeZone: TIMEZONE },
+      end: { dateTime: endTime, timeZone: TIMEZONE },
       description,
       location,
     },

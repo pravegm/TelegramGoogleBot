@@ -1,7 +1,8 @@
+import "dotenv/config";
 import { searchEmails, readEmail } from "./google_client.js";
 
 export async function getDeliveryStatus() {
-  const accounts = ["account1", "account2"];
+  const accounts = (process.env.GOOGLE_ACCOUNTS || "account1").split(",").map((a) => a.trim());
   const allEmails = [];
 
   for (const account of accounts) {

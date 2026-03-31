@@ -1,6 +1,6 @@
 # Telegram Google Bot
 
-A personal assistant Telegram bot that connects to Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks) and provides intelligent responses powered by Gemini.
+A personal assistant Telegram bot that connects to Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks) and provides intelligent responses powered by Gemini. Supports multiple Google accounts, voice messages, scheduled briefings, and web search.
 
 ## Features
 
@@ -10,16 +10,111 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 - **Google Docs** -- read, create, and append to documents
 - **Google Sheets** -- read, create, append rows, and update cells
 - **Google Tasks** -- list task lists, list/create/complete/update/delete tasks
-- **Delivery Tracking** -- scans emails for delivery/parcel updates across multiple accounts
+- **Delivery Tracking** -- scans emails for delivery/parcel updates across all accounts
 - **Voice Notes** -- transcribes voice messages and responds
 - **Web Search** -- answers general knowledge questions via Google Search grounding
-- **Scheduled Updates** -- morning email digest + delivery briefing (8am), world news (1pm), AI news (7pm)
-- **Multi-account** -- supports two Google accounts, switchable via commands
+- **Scheduled Updates** -- morning email digest + delivery briefing, world news, AI news (all configurable)
+- **Multi-account** -- supports any number of Google accounts, switchable via commands
 - **Conversation Memory** -- rolling summarization to maintain context across messages
+
+## Quick Start
+
+```bash
+git clone https://github.com/pravegm/TelegramGoogleBot.git
+cd TelegramGoogleBot
+npm install
+cp .env.example .env       # then edit .env with your values
+node reauth.js account1    # authorize your Google account
+node bot.js                # start the bot
+```
+
+## Setup
+
+### 1. Prerequisites
+
+- [Node.js](https://nodejs.org/) v18+
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- A [Google Cloud](https://console.cloud.google.com/) project
+- A [Gemini API key](https://aistudio.google.com/apikey)
+
+### 2. Google Cloud Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project (or use an existing one)
+2. Enable these APIs under **APIs & Services > Library**:
+   - Gmail API
+   - Google Calendar API
+   - Google Drive API
+   - Google Docs API
+   - Google Sheets API
+   - Google Tasks API
+3. Go to **APIs & Services > Credentials**
+4. Click **Create Credentials > OAuth client ID**
+5. Select **Desktop app** as the application type
+6. Download the JSON file and save it as `~/.google-mcp/credentials.json`
+
+### 3. Configure Environment
+
+Copy the example and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BOT_TOKEN` | Yes | Telegram bot token from BotFather |
+| `GEMINI_API_KEY` | Yes | Google AI Studio API key |
+| `ALLOWED_USER_ID` | Yes | Your Telegram user ID (send `/start` to [@userinfobot](https://t.me/userinfobot)) |
+| `USER_NAME` | No | Your name (used in greetings and prompts, default: "User") |
+| `TIMEZONE` | No | IANA timezone (e.g. `America/New_York`, default: `UTC`) |
+| `GOOGLE_ACCOUNTS` | No | Comma-separated account names (default: `account1`) |
+| `GOOGLE_CREDS_DIR` | No | Path to credentials directory (default: `~/.google-mcp`) |
+| `SCHEDULE_MORNING` | No | Cron schedule for morning briefing (default: `0 8 * * *`) |
+| `SCHEDULE_NEWS` | No | Cron schedule for world news (default: `0 13 * * *`) |
+| `SCHEDULE_AI_NEWS` | No | Cron schedule for AI news (default: `0 19 * * *`) |
+
+### 4. Authorize Google Accounts
+
+For each account listed in `GOOGLE_ACCOUNTS`, run:
+
+```bash
+node reauth.js account1
+```
+
+This opens a browser window for Google OAuth. Sign in and grant access. The token is saved to `~/.google-mcp/tokens/account1.json`.
+
+For multiple accounts:
+
+```bash
+node reauth.js account1    # sign in with first Google account
+node reauth.js account2    # sign in with second Google account
+```
+
+Then set `GOOGLE_ACCOUNTS=account1,account2` in your `.env`.
+
+### 5. Run
+
+```bash
+node bot.js
+```
+
+The bot validates all configuration on startup and will tell you exactly what's missing.
+
+### Background Execution (Windows)
+
+Place `start-bot.vbs` in your Windows Startup folder (`shell:startup`). It runs the bot silently and logs output to `bot.log`.
+
+Alternatively, use `run.bat` to run in a visible console window.
+
+## Bot Commands
+
+- `/start` -- welcome message
+- `/<accountname>` -- switch active Google account (e.g. `/account1`, `/account2`)
+- `/clear` -- reset conversation history
 
 ## Architecture
 
-11 consolidated function tools + Google Search (reduced from 33 individual tools to prevent model confusion):
+11 consolidated function tools + Google Search:
 
 | Tool | Actions |
 |------|---------|
@@ -33,55 +128,12 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 | `spreadsheet` | read, create, append, update |
 | `tasks` | list_lists, list, create, complete, update, delete |
 | `switch_account` | Switch active Google account |
-| `get_delivery_status` | Scan both accounts for delivery emails |
+| `get_delivery_status` | Scan all accounts for delivery emails |
 
-## Models
+### Models
 
 - **Gemini 3 Flash Preview** (with thinking) -- user-facing chat and tool calling
 - **Gemini 2.5 Flash Lite** -- background tasks (summarization, transcription, scheduled updates)
-
-## Setup
-
-### Prerequisites
-
-- Node.js v18+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- A Google Cloud project with Gmail, Calendar, Drive, Docs, Sheets, and Tasks APIs enabled
-- Google OAuth2 credentials (Desktop app type)
-- A Gemini API key
-
-### Installation
-
-```bash
-npm install
-```
-
-### Configuration
-
-Create a `.env` file:
-
-```
-BOT_TOKEN=your_telegram_bot_token
-GEMINI_API_KEY=your_gemini_api_key
-ALLOWED_USER_ID=your_telegram_user_id
-```
-
-Place your Google OAuth credentials at `~/.google-mcp/credentials.json` and account tokens at `~/.google-mcp/tokens/account1.json` (and optionally `account2.json`).
-
-### Running
-
-```bash
-node bot.js
-```
-
-For background execution on Windows, use the included `start-bot.vbs` (place in Startup folder for auto-launch). Output is logged to `bot.log`.
-
-## Bot Commands
-
-- `/start` -- welcome message
-- `/account1` -- switch to Google account 1
-- `/account2` -- switch to Google account 2
-- `/clear` -- reset conversation history
 
 ## License
 

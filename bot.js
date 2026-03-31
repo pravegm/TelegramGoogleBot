@@ -15,6 +15,45 @@ import { getDeliveryStatus } from "./tracker.js";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ALLOWED_USER_ID = Number(process.env.ALLOWED_USER_ID);
+const USER_NAME = process.env.USER_NAME || "User";
+const TIMEZONE = process.env.TIMEZONE || "UTC";
+const GOOGLE_ACCOUNTS = (process.env.GOOGLE_ACCOUNTS || "account1").split(",").map((a) => a.trim());
+
+const SCHEDULE_MORNING = process.env.SCHEDULE_MORNING || "0 8 * * *";
+const SCHEDULE_NEWS = process.env.SCHEDULE_NEWS || "0 13 * * *";
+const SCHEDULE_AI_NEWS = process.env.SCHEDULE_AI_NEWS || "0 19 * * *";
+
+// ==================== Startup Validation ====================
+
+const missing = [];
+if (!BOT_TOKEN) missing.push("BOT_TOKEN");
+if (!process.env.GEMINI_API_KEY) missing.push("GEMINI_API_KEY");
+if (!process.env.ALLOWED_USER_ID) missing.push("ALLOWED_USER_ID");
+if (missing.length) {
+  console.error(`Missing required environment variables: ${missing.join(", ")}`);
+  console.error("Copy .env.example to .env and fill in your values.");
+  process.exit(1);
+}
+
+import { existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+
+const GOOGLE_CREDS_DIR = process.env.GOOGLE_CREDS_DIR || join(homedir(), ".google-mcp");
+const credsPath = join(GOOGLE_CREDS_DIR, "credentials.json");
+if (!existsSync(credsPath)) {
+  console.error(`Google OAuth credentials not found at: ${credsPath}`);
+  console.error("See README for setup instructions.");
+  process.exit(1);
+}
+for (const acct of GOOGLE_ACCOUNTS) {
+  const tokenPath = join(GOOGLE_CREDS_DIR, "tokens", `${acct}.json`);
+  if (!existsSync(tokenPath)) {
+    console.error(`Token file not found for account "${acct}": ${tokenPath}`);
+    console.error("Run: node reauth.js " + acct);
+    process.exit(1);
+  }
+}
 
 const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const bot = new Bot(BOT_TOKEN);
@@ -67,7 +106,7 @@ const conversations = {};
 
 function getConvo(userId) {
   if (!conversations[userId]) {
-    conversations[userId] = { account: "account1", history: [], summary: "" };
+    conversations[userId] = { account: GOOGLE_ACCOUNTS[0], history: [], summary: "" };
   }
   return conversations[userId];
 }
@@ -109,11 +148,14 @@ async function compactHistory(convo) {
 
 function buildSystemPrompt(account, summary) {
   const today = new Date().toLocaleDateString("en-GB", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Europe/London",
+    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: TIMEZONE,
   });
 
+  const accountList = GOOGLE_ACCOUNTS.join(", ");
+  const multiAccount = GOOGLE_ACCOUNTS.length > 1;
+
   let prompt =
-    `You are Praveg's personal assistant on Telegram. You're sharp, efficient, and talk like a trusted PA -- not a chatbot.\n\n` +
+    `You are ${USER_NAME}'s personal assistant on Telegram. You're sharp, efficient, and talk like a trusted PA -- not a chatbot.\n\n` +
     `<identity>\n` +
     `- You text like a real person. Short, direct, warm but not cheesy.\n` +
     `- You never say "Here's what I found", "Let me check", "I hope this helps", "Sure!", "Certainly!", "Of course!".\n` +
@@ -143,10 +185,10 @@ function buildSystemPrompt(account, summary) {
     `  - Use <i>timestamps</i> and <i>dates</i> in natural language: "tomorrow at 3pm" not "2026-03-28T15:00:00Z"\n` +
     `</formatting>\n\n` +
     `<behaviour>\n` +
-    `- Active Google account: ${account}. Use this unless Praveg mentions the other one.\n` +
-    `- Both accounts are available: account1 and account2.\n` +
-    `- Today is ${today}. Timezone: Europe/London.\n` +
-    `- When asked about deliveries, call the get_delivery_status tool. It checks BOTH accounts for delivery emails. Present the results clearly.\n` +
+    `- Active Google account: ${account}.` + (multiAccount ? ` Use this unless ${USER_NAME} mentions another one.\n` : `\n`) +
+    (multiAccount ? `- Available accounts: ${accountList}.\n` : "") +
+    `- Today is ${today}. Timezone: ${TIMEZONE}.\n` +
+    `- When asked about deliveries, call the get_delivery_status tool. It checks all accounts for delivery emails. Present the results clearly.\n` +
     `- When listing emails: summarise, don't dump. Group by what matters.\n` +
     `- When something was "out for delivery" 2+ days ago, say it's likely delivered.\n` +
     `- After showing emails, suggest quick actions if relevant (e.g. "want me to reply?" or "archive these?").\n` +
@@ -181,7 +223,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         query: { type: Type.STRING, description: "Gmail search query" },
         maxResults: { type: Type.NUMBER, description: "Max emails to return (default 10)" },
       },
@@ -194,7 +236,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         messageId: { type: Type.STRING, description: "Gmail message ID" },
       },
       required: ["account", "messageId"],
@@ -206,7 +248,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'send', 'reply', 'archive', or 'trash'" },
         messageId: { type: Type.STRING, description: "Email ID (required for reply/archive/trash)" },
         to: { type: Type.STRING, description: "Recipient (required for send)" },
@@ -223,7 +265,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'list', 'create', 'update', or 'delete'" },
         timeMin: { type: Type.STRING, description: "Start of range ISO format (for list)" },
         timeMax: { type: Type.STRING, description: "End of range ISO format (for list)" },
@@ -243,7 +285,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'search', 'list', or 'tree'" },
         query: { type: Type.STRING, description: "Search term (for search)" },
         folderId: { type: Type.STRING, description: "Folder ID for tree (default: root)" },
@@ -258,7 +300,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'move', 'rename', 'copy', 'delete', or 'create_folder'" },
         fileId: { type: Type.STRING, description: "File/folder ID (for move/rename/copy/delete)" },
         newParentId: { type: Type.STRING, description: "Destination folder ID (for move)" },
@@ -274,7 +316,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'read', 'create', or 'append'" },
         docId: { type: Type.STRING, description: "Doc ID (for read/append)" },
         title: { type: Type.STRING, description: "Document title (for create)" },
@@ -289,7 +331,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'read', 'create', 'append', or 'update'" },
         spreadsheetId: { type: Type.STRING, description: "Spreadsheet ID (for read/append/update)" },
         title: { type: Type.STRING, description: "Title (for create)" },
@@ -306,7 +348,7 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
         action: { type: Type.STRING, description: "'list_lists', 'list', 'create', 'complete', 'update', or 'delete'" },
         taskListId: { type: Type.STRING, description: "Task list ID (default: '@default')" },
         taskId: { type: Type.STRING, description: "Task ID (for complete/update/delete)" },
@@ -324,14 +366,14 @@ const functionDeclarations = [
     parameters: {
       type: Type.OBJECT,
       properties: {
-        account: { type: Type.STRING, description: "'account1' or 'account2'" },
+        account: { type: Type.STRING, description: `One of: ${GOOGLE_ACCOUNTS.join(", ")}` },
       },
       required: ["account"],
     },
   },
   {
     name: "get_delivery_status",
-    description: "Get delivery/parcel tracking status. Searches both Google accounts for delivery emails from the past 7 days. Use whenever the user asks about deliveries, parcels, packages, or tracking.",
+    description: "Get delivery/parcel tracking status. Searches all Google accounts for delivery emails from the past 7 days. Use whenever the user asks about deliveries, parcels, packages, or tracking.",
     parameters: { type: Type.OBJECT, properties: {} },
   },
 ];
@@ -365,8 +407,8 @@ async function executeTool(name, args, convo) {
           if (args.summary) updates.summary = args.summary;
           if (args.description) updates.description = args.description;
           if (args.location) updates.location = args.location;
-          if (args.startTime) updates.start = { dateTime: args.startTime, timeZone: "Europe/London" };
-          if (args.endTime) updates.end = { dateTime: args.endTime, timeZone: "Europe/London" };
+          if (args.startTime) updates.start = { dateTime: args.startTime, timeZone: TIMEZONE };
+          if (args.endTime) updates.end = { dateTime: args.endTime, timeZone: TIMEZONE };
           return await updateEvent(args.account, args.eventId, updates);
         }
         case "delete": return await deleteEvent(args.account, args.eventId);
@@ -581,9 +623,9 @@ async function chat(userId, userMessage) {
 
 function liteSysPrompt() {
   const today = new Date().toLocaleDateString("en-GB", {
-    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Europe/London",
+    weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: TIMEZONE,
   });
-  return `You are Praveg's personal assistant. Today is ${today}. Timezone: Europe/London.\n` +
+  return `You are ${USER_NAME}'s personal assistant. Today is ${today}. Timezone: ${TIMEZONE}.\n` +
     `Format replies using Telegram HTML: <b>bold</b> for headings, <i>italic</i> for dates.\n` +
     `Keep it concise and scannable. No asterisks, no markdown, no bullets. Separate items with blank lines.`;
 }
@@ -676,24 +718,24 @@ async function sendFormattedReply(ctx, text) {
 }
 
 bot.command("start", async (ctx) => {
+  const accountInfo = GOOGLE_ACCOUNTS.length > 1
+    ? `I'm connected to your Google accounts (${GOOGLE_ACCOUNTS.join(", ")}).`
+    : `I'm connected to your Google account.`;
   await ctx.reply(
-    "Hey Praveg \u{1F44B}\n\nJust text me like normal. I'm connected to both your Google accounts.\n\nAsk me anything -- emails, calendar, deliveries, tasks, files, or just general stuff.",
+    `Hey ${USER_NAME} \u{1F44B}\n\nJust text me like normal. ${accountInfo}\n\nAsk me anything -- emails, calendar, deliveries, tasks, files, or just general stuff.`,
     { parse_mode: "HTML" }
   );
 });
 
-bot.command("account1", async (ctx) => {
-  getConvo(ctx.from.id).account = "account1";
-  await ctx.reply("Switched to <b>account1</b>", { parse_mode: "HTML" });
-});
-
-bot.command("account2", async (ctx) => {
-  getConvo(ctx.from.id).account = "account2";
-  await ctx.reply("Switched to <b>account2</b>", { parse_mode: "HTML" });
-});
+for (const acct of GOOGLE_ACCOUNTS) {
+  bot.command(acct, async (ctx) => {
+    getConvo(ctx.from.id).account = acct;
+    await ctx.reply(`Switched to <b>${acct}</b>`, { parse_mode: "HTML" });
+  });
+}
 
 bot.command("clear", async (ctx) => {
-  conversations[ctx.from.id] = { account: "account1", history: [], summary: "" };
+  conversations[ctx.from.id] = { account: GOOGLE_ACCOUNTS[0], history: [], summary: "" };
   await ctx.reply("Conversation cleared. Fresh start.");
 });
 
@@ -779,7 +821,7 @@ async function sendDeliveryUpdate() {
   console.log(`[${new Date().toISOString()}] Sending morning delivery update...`);
   try {
     const deliveryData = await getDeliveryStatus();
-    const prompt = `Here is raw delivery email data from Praveg's Google accounts:\n\n${JSON.stringify(deliveryData).slice(0, 8000)}\n\nSummarise what's arriving today, what's in transit, and what was delivered recently. Be concise. Use Telegram HTML formatting.`;
+    const prompt = `Here is raw delivery email data from ${USER_NAME}'s Google accounts:\n\n${JSON.stringify(deliveryData).slice(0, 8000)}\n\nSummarise what's arriving today, what's in transit, and what was delivered recently. Be concise. Use Telegram HTML formatting.`;
     const reply = await chatLite(prompt);
     if (!reply) return;
     const chunks = [];
@@ -799,21 +841,20 @@ async function sendDeliveryUpdate() {
 async function sendMorningEmailDigest() {
   console.log(`[${new Date().toISOString()}] Sending morning email digest...`);
   try {
-    const [emails1, emails2] = await Promise.all([
-      searchEmails("account1", "newer_than:1d", 20),
-      searchEmails("account2", "newer_than:1d", 20),
-    ]);
-    const combined = [
-      ...emails1.map((e) => ({ ...e, account: "account1" })),
-      ...emails2.map((e) => ({ ...e, account: "account2" })),
-    ];
+    const results = await Promise.all(
+      GOOGLE_ACCOUNTS.map((acct) => searchEmails(acct, "newer_than:1d", 20).then(
+        (emails) => emails.map((e) => ({ ...e, account: acct })),
+        () => [],
+      ))
+    );
+    const combined = results.flat();
     if (!combined.length) {
       await bot.api.sendMessage(ALLOWED_USER_ID, "No emails in the last 24 hours.");
       return;
     }
     const data = combined.map((e) => `[${e.account}] From: ${e.from} | Subject: ${e.subject} | Date: ${e.date} | Snippet: ${e.snippet}`).join("\n");
     const prompt =
-      `Here are all emails from Praveg's two Google accounts in the past 24 hours:\n\n${data.slice(0, 10000)}\n\n` +
+      `Here are all emails from ${USER_NAME}'s Google accounts in the past 24 hours:\n\n${data.slice(0, 10000)}\n\n` +
       `Give a concise morning briefing. Group by what matters:\n` +
       `1. Anything that needs IMMEDIATE action or response (urgent, time-sensitive, requires a reply)\n` +
       `2. Important but not urgent (receipts, confirmations, newsletters worth reading)\n` +
@@ -835,21 +876,21 @@ async function sendMorningEmailDigest() {
   }
 }
 
-cron.schedule("0 8 * * *", () => { sendDeliveryUpdate(); sendMorningEmailDigest(); }, { timezone: "Europe/London" });
+cron.schedule(SCHEDULE_MORNING, () => { sendDeliveryUpdate(); sendMorningEmailDigest(); }, { timezone: TIMEZONE });
 
-cron.schedule("0 13 * * *", () => {
+cron.schedule(SCHEDULE_NEWS, () => {
   sendScheduledUpdate(
     `Search the web for today's top world news headlines. Give a quick summary of the 5-6 most important things happening in the world right now. Cover a mix: politics, economy, tech, anything major. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
     "Afternoon world news"
   );
-}, { timezone: "Europe/London" });
+}, { timezone: TIMEZONE });
 
-cron.schedule("0 19 * * *", () => {
+cron.schedule(SCHEDULE_AI_NEWS, () => {
   sendScheduledUpdate(
     `Search the web for today's latest AI and tech news. Give a summary of the 5-6 most interesting AI developments, product launches, research breakthroughs, or industry moves from today. Keep each item to 1-2 sentences. Use HTML formatting with <b>bold</b> for headlines.`,
     "Evening AI news"
   );
-}, { timezone: "Europe/London" });
+}, { timezone: TIMEZONE });
 
 // ==================== Error Handling & Start ====================
 
@@ -858,7 +899,8 @@ process.on("uncaughtException", (err) => { console.error("Uncaught exception:", 
 
 bot.catch((err) => { console.error("Bot error:", err); });
 
-console.log(`Starting bot (chat: ${MODEL_HEAVY} w/ thinking HIGH | utility: ${MODEL_LITE})...`);
+console.log(`Starting bot for ${USER_NAME} (${GOOGLE_ACCOUNTS.join(", ")}) | TZ: ${TIMEZONE}`);
+console.log(`Models: ${MODEL_HEAVY} (chat) | ${MODEL_LITE} (utility)`);
 console.log(`Tools: ${functionDeclarations.length} functions + Google Search`);
-console.log("Scheduled: 8am deliveries+email digest | 1pm world news | 7pm AI news");
+console.log(`Scheduled: morning [${SCHEDULE_MORNING}] | news [${SCHEDULE_NEWS}] | AI [${SCHEDULE_AI_NEWS}]`);
 bot.start();
