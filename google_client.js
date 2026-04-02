@@ -182,17 +182,20 @@ export async function listEvents(account, timeMin, timeMax, maxResults = 15) {
   }));
 }
 
-export async function createEvent(account, summary, startTime, endTime, description = "", location = "") {
+export async function createEvent(account, summary, startTime, endTime, description = "", location = "", attendees = []) {
   const cal = google.calendar({ version: "v3", auth: getAuth(account) });
+  const body = {
+    summary,
+    start: { dateTime: startTime, timeZone: TIMEZONE },
+    end: { dateTime: endTime, timeZone: TIMEZONE },
+    description,
+    location,
+  };
+  if (attendees.length) body.attendees = attendees.map((e) => ({ email: e }));
   const res = await cal.events.insert({
     calendarId: "primary",
-    requestBody: {
-      summary,
-      start: { dateTime: startTime, timeZone: TIMEZONE },
-      end: { dateTime: endTime, timeZone: TIMEZONE },
-      description,
-      location,
-    },
+    requestBody: body,
+    sendUpdates: attendees.length ? "all" : "none",
   });
   return res.data;
 }
@@ -427,6 +430,7 @@ export async function updateEvent(account, eventId, updates) {
     calendarId: "primary",
     eventId,
     requestBody: updates,
+    sendUpdates: updates.attendees ? "all" : "none",
   });
   return res.data;
 }

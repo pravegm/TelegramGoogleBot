@@ -5,7 +5,7 @@ A personal assistant Telegram bot that connects to Google Workspace (Gmail, Cale
 ## Features
 
 - **Gmail** -- search, read, send, reply, archive, and trash emails
-- **Google Calendar** -- list, create, update, and delete events
+- **Google Calendar** -- list, create, update, and delete events; invite attendees
 - **Google Drive** -- search, browse folder tree, move, rename, copy, delete files, create folders
 - **Google Docs** -- read, create, and append to documents
 - **Google Sheets** -- read, create, append rows, and update cells
@@ -135,7 +135,7 @@ Alternatively, use `run.bat` to run in a visible console window.
 | `search_emails` | Search/list emails with Gmail query syntax |
 | `read_email` | Read full email content by ID |
 | `manage_email` | send, reply, archive, trash |
-| `calendar` | list, create, update, delete |
+| `calendar` | list, create, update, delete, invite attendees |
 | `drive_search` | search, list, tree |
 | `drive_manage` | move, rename, copy, delete, create_folder |
 | `document` | read, create, append |

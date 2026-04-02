@@ -275,6 +275,7 @@ const functionDeclarations = [
         endTime: { type: Type.STRING, description: "End time ISO (for create/update)" },
         description: { type: Type.STRING, description: "Event description (optional)" },
         location: { type: Type.STRING, description: "Event location (optional)" },
+        attendees: { type: Type.ARRAY, description: "List of guest email addresses to invite", items: { type: Type.STRING } },
       },
       required: ["account", "action"],
     },
@@ -401,7 +402,7 @@ async function executeTool(name, args, convo) {
     case "calendar": {
       switch (args.action) {
         case "list": return await listEvents(args.account, args.timeMin, args.timeMax, args.maxResults || 15);
-        case "create": return await createEvent(args.account, args.summary, args.startTime, args.endTime, args.description || "", args.location || "");
+        case "create": return await createEvent(args.account, args.summary, args.startTime, args.endTime, args.description || "", args.location || "", args.attendees || []);
         case "update": {
           const updates = {};
           if (args.summary) updates.summary = args.summary;
@@ -409,6 +410,7 @@ async function executeTool(name, args, convo) {
           if (args.location) updates.location = args.location;
           if (args.startTime) updates.start = { dateTime: args.startTime, timeZone: TIMEZONE };
           if (args.endTime) updates.end = { dateTime: args.endTime, timeZone: TIMEZONE };
+          if (args.attendees) updates.attendees = args.attendees.map((e) => ({ email: e }));
           return await updateEvent(args.account, args.eventId, updates);
         }
         case "delete": return await deleteEvent(args.account, args.eventId);
